@@ -7,12 +7,8 @@ use std::thread::sleep;
 
 use anyhow::{Result, Context};
 use clap::Parser;
-use mimalloc::MiMalloc;
 
 use crate::config::*;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
 
 const OUTPUT_NAME: &str = "satpaper_latest.png";
 const SLEEP_DURATION: Duration = Duration::from_secs(60);
@@ -36,7 +32,7 @@ fn update_wallpaper() -> Result<()> {
     let mut timestamp = None;
     
     loop  {
-        log::info!("Checking timestamp...");
+        log::debug!("Checking timestamp...");
 
         let new = slider::fetch_latest_timestamp(&config)
             .unwrap_or_else(|err| {
@@ -67,18 +63,6 @@ fn update_wallpaper() -> Result<()> {
 
                 log::info!("New wallpaper composited and set.");
             }
-        }
-        
-        // Safety: as far as I can tell, this function doesn't have any safety
-        // preconditions?
-        //
-        // Even the official C documentation doesn't document any invariants etc -
-        // it only mentions that it's intended for specific niche cases (which we happen to be one of!)
-        unsafe {
-            // Aggressively return as much memory to the operating system as possible.
-            //
-            // (Yes, this is necessary.)
-            libmimalloc_sys::mi_collect(true);
         }
 
         log::debug!("Sleeping for {SLEEP_DURATION:?}...");
