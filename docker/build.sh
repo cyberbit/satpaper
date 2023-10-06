@@ -20,3 +20,7 @@ tagargs=$(gentags $@)
 echo Satpaper :: Building tags: $@
 echo Satpaper :: Generated tag arguments: $tagargs
 docker build $tagargs -f docker/Dockerfile .
+
+# docker logout
+# docker login
+# docker push cyberbit/satpaper:TAG
