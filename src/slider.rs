@@ -16,10 +16,7 @@ const SLIDER_PRODUCT: &str = "geocolor";
 
 pub fn composite_latest_image(config: &Config) -> Result<bool> {
     download(config)
-        .map(|image| {
-            composite(config, image)
-        })
-        .and_then(std::convert::identity)
+        .and_then(|image| composite(config, image))
         .map(|_| true)
         .or_else(|err| {
             log::error!("Failed to download source image: {err}");
@@ -153,10 +150,7 @@ fn composite(config: &Config, image: DynamicImage) -> Result<()> {
 
         log::info!("Applying transparent background to source image...");
 
-        match std::env::var("SATPAPER_ENABLE_FLOOD_FILL").is_ok() {
-            false => cutout_disk_march(&mut source),
-            true => cutout_disk_flood(&mut source)
-        }
+        cutout_disk(&mut source);
             
         destination = image;
     } 
@@ -193,8 +187,8 @@ fn composite(config: &Config, image: DynamicImage) -> Result<()> {
     Ok(())
 }
 
-const BLACK: Rgba<u8> = Rgba([4, 4, 4, 255]);
 const CLEAR: Rgba<u8> = Rgba([0; 4]);
+const BLACK: Rgba<u8> = Rgba([4, 4, 4, 255]);
 
 #[derive(Clone, Copy, Debug)]
 enum Direction {
@@ -204,75 +198,11 @@ enum Direction {
     Right
 }
 
-fn cutout_disk_flood(image: &mut DynamicImage) {
-    use std::collections::VecDeque;
-
+// Identifies the bounds of the Earth in the image
+fn cutout_disk(image: &mut DynamicImage) {
+    // Find the midpoint and max of the edges.
     let x_max = image.dimensions().0 - 1;
     let y_max = image.dimensions().1 - 1;
-
-    let step = |mut x: u32, mut y: u32, direction: Direction| {
-        use Direction::*;
-
-        match direction {
-            Up => y = y.saturating_add(1),
-            Down => y = y.saturating_sub(1),
-            Left => x = x.saturating_sub(1),
-            Right => x = x.saturating_add(1),
-        };
-
-        (x, y)
-    };
-
-    let mut flood_fill = |x: u32, y: u32| {
-        use Direction::*;
-
-        let mut queue = VecDeque::new();
-
-        queue.push_back((x, y));
-
-        while !queue.is_empty() {
-            let (x, y) = queue
-                .pop_front()
-                .expect("Queue should not be empty");
-            
-            if x > x_max ||
-               y > y_max
-            {
-                continue;
-            }
-
-            let pixel = image.get_pixel(x, y);
-
-            // It turns out that some pixels in the "black" background are actually [1, 1, 1, 255]!
-            // Why? Who knows.
-            if pixel.0 <= BLACK.0 && pixel != CLEAR {
-                image.put_pixel(x, y, CLEAR);
-
-                queue.push_back(step(x, y, Up));
-                queue.push_back(step(x, y, Down));
-                queue.push_back(step(x, y, Left));
-                queue.push_back(step(x, y, Right));
-            }
-        }
-    };
-
-    // These might seem redundant, but it's necessary to handle differences in the
-    // satellite imagery - GOES has no space between the Earth and image edge on the left and right,
-    // while the rest do.
-    //
-    // This handles the "edge case" of GOES's separated corners, while not doing any extra work
-    // for the likes of Himawari (because the first fill will get all the pixels, causing the rest to finish immediately.)
-    flood_fill(0, 0);
-    flood_fill(x_max, 0);
-    flood_fill(0, y_max);
-    flood_fill(x_max, y_max);
-}
-
-// Identifies the bounds of the Earth in the image
-fn cutout_disk_march(image: &mut DynamicImage) {
-    // Find the midpoint and max of the edges.
-    let x_max = image.dimensions().0;
-    let y_max = image.dimensions().1;
     let x_center = x_max / 2;
     let y_center = y_max / 2;
 
@@ -280,10 +210,10 @@ fn cutout_disk_march(image: &mut DynamicImage) {
         use Direction::*;
 
         match direction {
-            Up => y.saturating_add(1),
-            Down => y.saturating_sub(1),
-            Left => x.saturating_sub(1),
-            Right => x.saturating_add(1),
+            Up => *y = y.saturating_sub(1),
+            Down => *y = y.saturating_add(1),
+            Left => *x = x.saturating_sub(1),
+            Right => *x = x.saturating_add(1),
         }
     };
 
@@ -293,17 +223,25 @@ fn cutout_disk_march(image: &mut DynamicImage) {
         log::debug!("Performing cutout march for direction {direction:?}...");
 
         loop {
-            if x >= x_max || y >= y_max {
-                log::debug!("Found disk bounds (max) at {x}, {y}.");
-                return (x, y);
-            }
-
-            if image.get_pixel(x, y).0 <= [1, 1, 1, 255] {
+            if image.get_pixel(x, y).0 > BLACK.0 {
                 log::debug!("Found disk bounds at {x}, {y}.");
-                return (x, y)
+                break (x, y)
             };
 
             step(&mut x, &mut y, direction);
+
+            if y == 0 || x == 0 {
+                log::debug!("Found disk bounds (min) at {x}, {y}.");
+                break (x, y);
+            }
+
+            if x > x_max || y > y_max {
+                log::debug!("Found disk bounds (max) at {x}, {y}.");
+                break (
+                    x.min(x_max),
+                    y.min(y_max)
+                );
+            }
         }
     };
 
@@ -317,9 +255,6 @@ fn cutout_disk_march(image: &mut DynamicImage) {
     // Approximate the centroid and radius of the circle.
     let radius = (disk_right.0 - disk_left.0) + (disk_bottom.1 - disk_top.1);
     let radius = radius / 4;
-
-    let x_center = (disk_bottom.0 + disk_top.0 + disk_left.0 + disk_right.0) / 4;
-    let y_center = (disk_bottom.1 + disk_top.1 + disk_left.1 + disk_right.1) / 4;
 
     log::debug!("Radius: {radius} Center X: {x_center} Center Y: {y_center}");
 
@@ -336,14 +271,9 @@ fn cutout_disk_march(image: &mut DynamicImage) {
             let x_component = (x - x_center).pow(2);
             let y_component = (y - y_center).pow(2);
 
-            log::debug!("Finding distance from circle center for pixel at {x}, {y}...");
-            log::debug!("X component: {x_component} Y component: {y_component}");
-
             let root = (x_component + y_component) as f32;
             let root = root.sqrt().floor() as u32;
             
-            log::debug!("Pixel at {x}, {y} is {root} away from circle center.");
-
             root > radius
         })
         .for_each(|(_, _, pixel)| {
